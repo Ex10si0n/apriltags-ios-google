@@ -20,6 +20,8 @@
 #include "common/zarray.h"
 #include "apriltags/apriltag.h"
 
+#include "apriltag_pose.h"
+
 #define MIN_TAP_SIZE 44
 
 struct processed_frame
@@ -70,8 +72,15 @@ struct processed_frame
     pthread_mutex_t pf_mutex;  // protects processed_frames
 
     zarray_t *processed_frames; // struct processed_frame*
- 
+    
+    NSMutableArray<NSDictionary *> *traceSamples;
+    BOOL traceRecording;
+    
 }
+
+- (void)startTrace;
+- (void)stopTraceAndExport;
+
 @property (strong, nonatomic) UIWindow *window;
 @property zarray_t *tagFamilies;
 @property apriltag_detector_t *detector;

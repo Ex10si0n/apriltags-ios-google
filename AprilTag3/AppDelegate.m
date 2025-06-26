@@ -303,6 +303,44 @@ static NSMutableArray *blockWrappers;
     
 }
 
+- (void)startTrace
+{
+    [traceSamples removeAllObjects];
+    traceRecording = YES;
+    [self updateRecordLabel:@"REC"];          // turns the red status ✱ on
+}
+
+- (void)stopTraceAndExport
+{
+    traceRecording = NO;
+    [self updateRecordLabel:@"EXP"];          // brief visual feedback
+
+    // ------- Build CSV -----------
+    NSMutableString *csv =
+       [NSMutableString stringWithString:@"timestamp_ms,tag_id,x_m,y_m,z_m\n"];
+
+    for (NSDictionary *row in traceSamples) {
+        [csv appendFormat:@"%llu,%d,%.4f,%.4f,%.4f\n",
+                [row[@"ts"] unsignedLongLongValue],
+                [row[@"id"] intValue],
+                [row[@"x"]  floatValue],
+                [row[@"y"]  floatValue],
+                [row[@"z"]  floatValue]];
+    }
+
+    NSString *fname = [NSString stringWithFormat:@"tag_trace_%llu.csv",
+                       (unsigned long long)([[NSDate date] timeIntervalSince1970]*1000)];
+    NSString *path  = [NSTemporaryDirectory() stringByAppendingPathComponent:fname];
+    [csv writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    // -------- Share sheet --------
+    NSURL *url = [NSURL fileURLWithPath:path];
+    UIActivityViewController *ac =
+        [[UIActivityViewController alloc] initWithActivityItems:@[url]
+                                          applicationActivities:nil];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
 // commit UI choices back to state and save.
 - (void) savePrefs
 {
@@ -350,6 +388,8 @@ static NSMutableArray *blockWrappers;
     [application setIdleTimerDisabled:YES];
     
     immortals = [[NSMutableArray alloc] init];
+    traceSamples  = [[NSMutableArray alloc] init];
+    traceRecording = NO;
     
     pthread_mutex_init(&detector_mutex, NULL);
     pthread_mutex_init(&pf_mutex, NULL);
@@ -451,6 +491,34 @@ static NSMutableArray *blockWrappers;
         
         [glView addSubview:button];
     }
+    
+    // ─── Trace CSV toggle ───────────────────────────────────────────────
+    UIButton *traceBtn = [[UIButton alloc] initWithFrame:
+        CGRectMake(glView.frame.size.width-100,          // same x as REC
+                   glView.frame.size.height-2*MIN_TAP_SIZE, // one row higher
+                   100, MIN_TAP_SIZE)];
+
+    UILabel *tLabel = [[UILabel alloc] initWithFrame:CGRectMake(0,0,100,30)];
+    tLabel.text      = @"TRACE";
+    tLabel.textColor = [UIColor cyanColor];
+    [tLabel setUserInteractionEnabled:NO];
+    [traceBtn addSubview:tLabel];
+
+    blockwrapper_callback_t traceCB = ^(UIControl *sender) {
+        if (!traceRecording)
+            [self startTrace];          // begin logging
+        else
+            [self stopTraceAndExport];  // finish & share CSV
+    };
+    [traceBtn addTarget:[[BlockWrapper alloc] initWithBlock:traceCB]
+                action:@selector(invoke:)
+      forControlEvents:UIControlEventTouchDown];
+
+    if (SHOW_BUTTON_BACKGROUND)
+        [traceBtn setBackgroundColor:[UIColor grayColor]];
+
+    [glView addSubview:traceBtn];
+    
     
     
     if (0) {
@@ -1187,7 +1255,7 @@ static NSMutableArray *blockWrappers;
                 matd_t *HH = matd_op("M*M", HS, det->H);
                 
                 // Now, given the projection matrix, what model view matrix would yield the correct overall transformation?
-                matd_t *M = homography_to_model_view(HH, MATD_EL(P,0,0), MATD_EL(P,1,1), MATD_EL(P,0,2), MATD_EL(P,1,2), MATD_EL(P,2,2), MATD_EL(P,2,3));
+                matd_t *M = homography_to_model_view(HH, MATD_EL(P,0,0), MATD_EL(P,1,1), MATD_EL(P,0,2), MATD_EL(P,1,2));
                 
                 // Insert the transform that we used when displaying the texture.
                 matd_t *PMtranspose = matd_op("(M'*M*M)'", mPMtranspose, P, M);
@@ -1591,6 +1659,40 @@ void neon_convert3(uint8_t * __restrict dest, uint8_t * __restrict src, int numP
     pthread_mutex_lock(&detector_mutex);
     zarray_t *detections = apriltag_detector_detect(_detector, im);
     pthread_mutex_unlock(&detector_mutex);
+    
+    if (traceRecording) {
+        uint64_t ts_ms = utime_now() / 1000;
+
+        // replace these with your real intrinsics
+        double fx = 1064, fy = 1064, cx_i = 960, cy_i = 540;
+        double tagSize = 0.055;   // metres
+
+        int nd = zarray_size(detections);
+        for (int i = 0; i < nd; i++) {
+            apriltag_detection_t *det;
+            zarray_get(detections, i, &det);
+
+            apriltag_detection_info_t info;
+            info.det      = det;
+            info.tagsize  = tagSize;
+            info.fx       = fx;
+            info.fy       = fy;
+            info.cx       = cx_i;
+            info.cy       = cy_i;
+
+            apriltag_pose_t pose;
+            estimate_tag_pose(&info, &pose);
+
+            // pose.t is a 3-vector (metres) in camera coordinates
+            [traceSamples addObject:@{
+                @"ts": @(ts_ms),
+                @"id": @(det->id),
+                @"x":  @((float)pose.t->data[0]),
+                @"y":  @((float)pose.t->data[1]),
+                @"z":  @((float)pose.t->data[2])
+            }];
+        }
+    }
 
     pthread_mutex_lock(&pf_mutex);
     struct processed_frame *pf = calloc(1, sizeof(struct processed_frame));
